@@ -70,7 +70,9 @@ runs:
       shell: bash
     - uses: actions/setup-node@v4 # Action setup-node@v4
       with:
-        node-version: 18
+        node-version-file: '.nvmrc'
+        cache: 'npm'
+        cache-dependency-path: '**/package-lock.json'
     - uses: ruby/setup-ruby@v1 # Action setup-ruby@v1
       with:
         ruby-version: 3.1
