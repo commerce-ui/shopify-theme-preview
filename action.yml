@@ -12,6 +12,9 @@ inputs:
   shopify_cli_theme_token:
     description: "Password generated from Theme Access app"
     required: true
+  github_token:
+    description: "GitHub token for managing PR labels"
+    required: true
   build_step:
     description: "Command used as build step"
     default: 'echo "No build step"'
@@ -86,6 +89,27 @@ runs:
     - name: Build step
       run: ${{ inputs.build_step }}
       shell: bash
+    - name: Get existing theme ID from PR labels
+      id: get-theme-id
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        PR_NUMBER="${{ github.event.issue.number || github.event.pull_request.number }}"
+        
+        # Get all labels from PR and find theme-id label
+        THEME_LABEL=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name | select(startswith("theme-id:"))' 2>/dev/null || echo "")
+        
+        if [ -n "$THEME_LABEL" ]; then
+          # Extract theme ID from label (format: theme-id:123456789)
+          THEME_ID="${THEME_LABEL#theme-id:}"
+          echo "Found existing theme ID: $THEME_ID"
+          echo "theme_id=$THEME_ID" >> $GITHUB_OUTPUT
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "No existing theme ID found, will create new development theme"
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
     - name: Create Preview Link # and safe the returned value in an output object
       id: link
       shell: bash
@@ -96,7 +120,13 @@ runs:
         SHOPIFY_CLI_THEME_TOKEN: ${{ inputs.shopify_cli_theme_token }}
       run: |
         echo 'JSON_RESPONSE<<EOF' >> $GITHUB_OUTPUT
-        shopify theme push --json --development --path ${{ inputs.dir}} >> $GITHUB_OUTPUT || true
+        if [ "${{ steps.get-theme-id.outputs.exists }}" == "true" ]; then
+          echo "Pushing to existing theme: ${{ steps.get-theme-id.outputs.theme_id }}"
+          shopify theme push --json --theme ${{ steps.get-theme-id.outputs.theme_id }} --path ${{ inputs.dir }} >> $GITHUB_OUTPUT || true
+        else
+          echo "Creating new development theme"
+          shopify theme push --json --development --path ${{ inputs.dir }} >> $GITHUB_OUTPUT || true
+        fi
         echo 'EOF' >> $GITHUB_OUTPUT
     - name: Format Data # Safe output in a temporary txt file and extract the last line with requested links
       run: |
@@ -106,6 +136,21 @@ runs:
         echo 'DEL' >> $GITHUB_OUTPUT
       id: temp
       shell: bash
+    - name: Save theme ID to PR label
+      if: ${{ steps.get-theme-id.outputs.exists != 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        PR_NUMBER="${{ github.event.issue.number || github.event.pull_request.number }}"
+        THEME_ID=$(echo '${{ steps.temp.outputs.LINK }}' | jq -r '.theme.id' 2>/dev/null || echo "")
+        
+        if [ -n "$THEME_ID" ] && [ "$THEME_ID" != "null" ]; then
+          echo "Saving theme ID $THEME_ID as label on PR #$PR_NUMBER"
+          gh pr edit "$PR_NUMBER" --add-label "theme-id:$THEME_ID"
+        else
+          echo "Warning: Could not extract theme ID from response"
+        fi
     - name: Comment Link # Override the loading comment from the start with the actual values and links
       uses: peter-evans/create-or-update-comment@v3.1.0
       with:
