@@ -162,7 +162,7 @@ runs:
           echo "Saving theme ID $THEME_ID as label on PR #$PR_NUMBER"
           
           # Create label if it doesn't exist
-          gh label create "theme-id:$THEME_ID" --description "Shopify theme preview ID" --color "1E90FF" 2>/dev/null || true
+          gh label create "theme-id:$THEME_ID" --description "Shopify theme preview ID" --color "CFE7FF" 2>/dev/null || true
           
           # Add label to PR
           gh pr edit "$PR_NUMBER" --add-label "theme-id:$THEME_ID"
