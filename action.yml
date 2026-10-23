@@ -154,6 +154,7 @@ runs:
         THEME_ID: ${{ steps.get-theme-id.outputs.theme_id }}
       run: |
         PUSH_OUTPUT="$RUNNER_TEMP/theme-push.txt"
+        PUSH_STATUS=0
 
         if [ "${{ steps.check-theme.outputs.exists }}" == "true" ]; then
           IGNORE_FLAGS=""
@@ -165,23 +166,23 @@ runs:
           fi
 
           echo "Pushing to existing theme: $THEME_ID"
-          shopify theme push --json --theme "$THEME_ID" --path ${{ inputs.dir }} $IGNORE_FLAGS > "$PUSH_OUTPUT"
+          shopify theme push --json --theme "$THEME_ID" --path ${{ inputs.dir }} $IGNORE_FLAGS > "$PUSH_OUTPUT" || PUSH_STATUS=$?
         else
           echo "Creating new development theme"
-          shopify theme push --json --development --path ${{ inputs.dir }} > "$PUSH_OUTPUT"
+          shopify theme push --json --development --path ${{ inputs.dir }} > "$PUSH_OUTPUT" || PUSH_STATUS=$?
         fi
 
-        # Upload errors still return JSON (with a warning); anything else is a failed push
+        # The CLI exits non-zero when single files fail to upload but still prints theme JSON.
+        # No theme JSON means the push itself failed.
         RESULT=$(tail -n1 "$PUSH_OUTPUT")
         if ! echo "$RESULT" | jq -e '.theme.id' > /dev/null 2>&1; then
-          echo "::error::'shopify theme push' did not return theme JSON"
+          echo "::error::'shopify theme push' did not return theme JSON (exit code $PUSH_STATUS)"
           cat "$PUSH_OUTPUT"
           exit 1
         fi
 
-        WARNING=$(echo "$RESULT" | jq -r '.theme.warning // empty')
-        if [ -n "$WARNING" ]; then
-          echo "::warning::$WARNING"
+        if [ "$PUSH_STATUS" -ne 0 ]; then
+          echo "::warning::Theme pushed with errors (exit code $PUSH_STATUS), see log above"
         fi
 
         echo "theme_id=$(echo "$RESULT" | jq -r '.theme.id')" >> $GITHUB_OUTPUT
