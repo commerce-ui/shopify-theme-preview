@@ -69,9 +69,10 @@ The action has the following steps:
 4. Set up Node.js and Ruby
 5. Install the Shopify CLI
 6. Optional build step via `build-step`-input
-7. Use the Shopify CLI to create the preview and save the returned preview link in an output object (optional path via `dir`-input)
-8. Update the table to display the preview links
-9. If any of the previous steps fail, create a comment on the pull request with an error message
+7. Read the theme ID from the PR's `theme-id:<id>` label. If that theme no longer exists (Shopify deletes development themes after ~7 days idle), remove the stale label
+8. Use the Shopify CLI to push to the existing theme, or create a new development theme and save its ID as a PR label (optional path via `dir`-input)
+9. Update the table to display the preview links
+10. If any of the previous steps fail (including a push that doesn't return theme JSON), create a comment on the pull request with an error message
 
 ---
 <div style="display: inline">

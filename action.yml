@@ -114,7 +114,36 @@ runs:
           echo "No existing theme ID found, will create new development theme"
           echo "exists=false" >> $GITHUB_OUTPUT
         fi
-    - name: Create Preview Link # and safe the returned value in an output object
+    - name: Check existing theme still exists # Shopify deletes development themes after ~7 days idle
+      id: check-theme
+      if: ${{ steps.get-theme-id.outputs.exists == 'true' }}
+      shell: bash
+      env:
+        SHOPIFY_FLAG_STORE: ${{ inputs.shopify_flag_store }}
+        SHOPIFY_CLI_THEME_TOKEN: ${{ inputs.shopify_cli_theme_token }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        THEME_ID: ${{ steps.get-theme-id.outputs.theme_id }}
+      run: |
+        PR_NUMBER="${{ github.event.issue.number || github.event.pull_request.number }}"
+
+        # Fail on CLI/API errors instead of treating them as a missing theme
+        THEMES=$(shopify theme list --json)
+        if ! echo "$THEMES" | jq -e 'type == "array"' > /dev/null; then
+          echo "::error::Unexpected output from 'shopify theme list --json'"
+          echo "$THEMES"
+          exit 1
+        fi
+
+        if echo "$THEMES" | jq -e --arg id "$THEME_ID" 'any(.[]; (.id | tostring) == $id)' > /dev/null; then
+          echo "Theme $THEME_ID still exists"
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "::warning::Theme $THEME_ID no longer exists, removing stale label and creating a new development theme"
+          gh pr edit "$PR_NUMBER" --remove-label "theme-id:$THEME_ID"
+          gh label delete "theme-id:$THEME_ID" --yes 2>/dev/null || true
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+    - name: Create Preview Link # and save the returned theme data in step outputs
       id: link
       shell: bash
       env:
@@ -122,10 +151,12 @@ runs:
         SHOPIFY_FLAG_STORE: ${{ inputs.shopify_flag_store }}
         # Password generated from Theme Access app
         SHOPIFY_CLI_THEME_TOKEN: ${{ inputs.shopify_cli_theme_token }}
+        THEME_ID: ${{ steps.get-theme-id.outputs.theme_id }}
       run: |
-        echo 'JSON_RESPONSE<<EOF' >> $GITHUB_OUTPUT
-        
-        if [ "${{ steps.get-theme-id.outputs.exists }}" == "true" ]; then
+        PUSH_OUTPUT="$RUNNER_TEMP/theme-push.txt"
+        PUSH_STATUS=0
+
+        if [ "${{ steps.check-theme.outputs.exists }}" == "true" ]; then
           IGNORE_FLAGS=""
           if [ -n "${{ inputs.ignore }}" ]; then
             for pattern in ${{ inputs.ignore }}; do
@@ -133,42 +164,45 @@ runs:
             done
             echo "Ignoring files to preserve Customizer changes: ${{ inputs.ignore }}"
           fi
-          
-          echo "Pushing to existing theme: ${{ steps.get-theme-id.outputs.theme_id }}"
-          shopify theme push --json --theme ${{ steps.get-theme-id.outputs.theme_id }} --path ${{ inputs.dir }} $IGNORE_FLAGS >> $GITHUB_OUTPUT || true
+
+          echo "Pushing to existing theme: $THEME_ID"
+          shopify theme push --json --theme "$THEME_ID" --path ${{ inputs.dir }} $IGNORE_FLAGS > "$PUSH_OUTPUT" || PUSH_STATUS=$?
         else
           echo "Creating new development theme"
-          shopify theme push --json --development --path ${{ inputs.dir }} >> $GITHUB_OUTPUT || true
+          shopify theme push --json --development --path ${{ inputs.dir }} > "$PUSH_OUTPUT" || PUSH_STATUS=$?
         fi
-        echo 'EOF' >> $GITHUB_OUTPUT
-    - name: Format Data # Safe output in a temporary txt file and extract the last line with requested links
-      run: |
-        echo '${{ steps.link.outputs.JSON_RESPONSE }}' > 'temp.txt'
-        echo 'LINK<<DEL' >> $GITHUB_OUTPUT
-        tail -n1 temp.txt >> $GITHUB_OUTPUT
-        echo 'DEL' >> $GITHUB_OUTPUT
-      id: temp
-      shell: bash
+
+        # The CLI exits non-zero when single files fail to upload but still prints theme JSON.
+        # No theme JSON means the push itself failed.
+        RESULT=$(tail -n1 "$PUSH_OUTPUT")
+        if ! echo "$RESULT" | jq -e '.theme.id' > /dev/null 2>&1; then
+          echo "::error::'shopify theme push' did not return theme JSON (exit code $PUSH_STATUS)"
+          cat "$PUSH_OUTPUT"
+          exit 1
+        fi
+
+        if [ "$PUSH_STATUS" -ne 0 ]; then
+          echo "::warning::Theme pushed with errors (exit code $PUSH_STATUS), see log above"
+        fi
+
+        echo "theme_id=$(echo "$RESULT" | jq -r '.theme.id')" >> $GITHUB_OUTPUT
+        echo "preview_url=$(echo "$RESULT" | jq -r '.theme.preview_url')" >> $GITHUB_OUTPUT
+        echo "editor_url=$(echo "$RESULT" | jq -r '.theme.editor_url')" >> $GITHUB_OUTPUT
     - name: Save theme ID to PR label
-      if: ${{ steps.get-theme-id.outputs.exists != 'true' }}
+      if: ${{ steps.check-theme.outputs.exists != 'true' }}
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        THEME_ID: ${{ steps.link.outputs.theme_id }}
       run: |
         PR_NUMBER="${{ github.event.issue.number || github.event.pull_request.number }}"
-        THEME_ID=$(echo '${{ steps.temp.outputs.LINK }}' | jq -r '.theme.id' 2>/dev/null || echo "")
-        
-        if [ -n "$THEME_ID" ] && [ "$THEME_ID" != "null" ]; then
-          echo "Saving theme ID $THEME_ID as label on PR #$PR_NUMBER"
-          
-          # Create label if it doesn't exist
-          gh label create "theme-id:$THEME_ID" --description "Shopify theme preview ID" --color "CFE7FF" 2>/dev/null || true
-          
-          # Add label to PR
-          gh pr edit "$PR_NUMBER" --add-label "theme-id:$THEME_ID"
-        else
-          echo "Warning: Could not extract theme ID from response"
-        fi
+        echo "Saving theme ID $THEME_ID as label on PR #$PR_NUMBER"
+
+        # Create label if it doesn't exist
+        gh label create "theme-id:$THEME_ID" --description "Shopify theme preview ID" --color "CFE7FF" 2>/dev/null || true
+
+        # Add label to PR
+        gh pr edit "$PR_NUMBER" --add-label "theme-id:$THEME_ID"
     - name: Comment Link # Override the loading comment from the start with the actual values and links
       uses: peter-evans/create-or-update-comment@v3.1.0
       with:
@@ -178,7 +212,7 @@ runs:
 
           | Name | Status | Preview | Editor | Date | Time |
           | :--- | :----- | :------ | :------ | :------ | :----- |
-          | ${{ inputs.shopify_flag_store }} | ✅ Ready | <a href="${{ fromJSON(steps.temp.outputs.LINK).theme.preview_url }}" target="_blank">Preview</a> | [Editor](${{ fromJSON(steps.temp.outputs.LINK).theme.editor_url }}) | ${{ steps.date.outputs.date }} | ${{ steps.time.outputs.time }}
+          | ${{ inputs.shopify_flag_store }} | ✅ Ready | <a href="${{ steps.link.outputs.preview_url }}" target="_blank">Preview</a> | [Editor](${{ steps.link.outputs.editor_url }}) | ${{ steps.date.outputs.date }} | ${{ steps.time.outputs.time }}
 
           *created by Brand Boosting GmbH | PotatoBot* [View on GitHub Marketplace](https://github.com/marketplace/actions/create-shopify-theme-preview)
         reactions: hooray
